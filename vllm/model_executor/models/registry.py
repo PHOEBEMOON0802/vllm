@@ -680,6 +680,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "DFlashDraftModel": ("qwen3_dflash", "DFlashQwen3ForCausalLM"),
     "LiLiCorrDraftModel": ("lilicorr", "LiLiCorrForCausalLM"),
     "DFlash2DraftModel": ("qwen3_dflash2", "DFlash2Qwen3ForCausalLM"),
+    "DMTP2DraftModel": ("qwen3_dmtp2", "DMTP2Qwen3ForCausalLM"),
     "DFlash2BeamDraftModel": ("vllm.models.beam", "DFlash2BeamForCausalLM"),
     "DFlash2RicursiveDraftModel": (
         "ricursive_dflash2",

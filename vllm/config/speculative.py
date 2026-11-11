@@ -105,7 +105,7 @@ MTPModelTypes = Literal[
     "glm5_next_mtp",
 ]
 NgramGPUTypes = Literal["ngram_gpu"]
-DFlashModelTypes = Literal["dflash"]
+DFlashModelTypes = Literal["dflash", "dmtp2"]
 DSparkModelTypes = Literal["dspark"]
 EagleModelTypes = Literal[
     "eagle", "eagle3", "extract_hidden_states", MTPModelTypes, DFlashModelTypes
@@ -1865,7 +1865,7 @@ class SpeculativeConfig:
         # NOTE: This method is usually a stand-in for "speculative decoding using
         # target model hidden states"
         # TODO(ben): Refactor this so the naming is clearer
-        return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+        return self.method in ("eagle", "eagle3", "mtp", "dflash", "dmtp2", "dspark")
 
     def needs_eagle_block_drop(self) -> bool:
         """Whether draft KV at a position depends on the next token.
@@ -1873,6 +1873,8 @@ class SpeculativeConfig:
         EAGLE-style drafters build a position's draft KV from its hidden state
         and the next token. DFlash/DSpark build it from the target hidden state
         alone, so only EAGLE/EAGLE3/MTP require the trailing-block drop.
+        D-MTP2 keeps the drop: its frozen MTP block's KV is EAGLE-style even
+        though the DFlash2 trunk's is not.
         """
         return self.use_eagle() and not (self.use_dflash() or self.use_dspark())
 

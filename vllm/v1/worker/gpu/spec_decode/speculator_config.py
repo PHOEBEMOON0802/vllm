@@ -309,6 +309,7 @@ _CONFIG_BY_METHOD: dict[str, str] = {
     "eagle3": _builtin("eagle.config", "Eagle3SpeculatorConfig"),
     "mtp": _builtin("mtp.config", "MTPSpeculatorConfig"),
     "dflash": _builtin("dflash.config", "DFlashSpeculatorConfig"),
+    "dmtp2": _builtin("dmtp2.config", "DMTP2SpeculatorConfig"),
     "dspark": _builtin("dspark.config", "DSparkSpeculatorConfig"),
 }
 

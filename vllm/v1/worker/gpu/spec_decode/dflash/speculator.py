@@ -69,6 +69,11 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         # Each request emits exactly (bonus + N mask) query tokens per step.
         self.num_query_per_req = 1 + self.num_speculative_steps
+        # Query offset of the first slot the draft itself predicts, and the
+        # number of such slots per request. DFlash predicts at every non-anchor
+        # slot; D-MTP2 overrides these (slot 1 carries the MTP-proposed T1).
+        self.first_draft_offset = 1
+        self.num_sample_steps = self.num_speculative_steps
 
         self.parallel_drafting_token_id = get_parallel_drafting_token_id(
             self.draft_model_config.hf_config
@@ -131,10 +136,10 @@ class DFlashSpeculator(DraftModelSpeculator):
         self.sample_idx_mapping = torch.full(
             (max_num_sampled_tokens,), -1, dtype=torch.int64, device=device
         )
-        # [0, 1, ..., N-1, 0, 1, ..., N-1, ...] -> the per-token column index into
+        # [0, 1, ..., S-1, 0, 1, ..., S-1, ...] -> the per-token column index into
         # draft_logits[req, step, :].
         self.sample_col = torch.arange(
-            self.num_speculative_steps, dtype=torch.int32, device=device
+            self.num_sample_steps, dtype=torch.int32, device=device
         ).repeat(self.max_num_reqs)
 
         self.query_cudagraph_manager: DFlashCudaGraphManager | None = None
@@ -589,12 +594,13 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.block_tables.cp_interleave,
                 self.parallel_drafting_token_id,
                 self.num_query_per_req,
-                self.num_speculative_steps,
+                self.num_sample_steps,
                 self.max_num_reqs,
                 self.max_num_tokens,
                 self.max_model_len,
                 self.sample_from_anchor,
                 num_reqs,
+                first_draft_offset=self.first_draft_offset,
             )
 
         if num_speculative_tokens == 0:
@@ -717,7 +723,7 @@ def _pad_dflash_inputs(
     pad_idx,
     num_reqs,
     num_query_per_req,
-    num_speculative_steps,
+    num_sample_steps,
     max_num_reqs,
     max_num_tokens,
     PAD_SLOT_ID: tl.constexpr,
@@ -741,8 +747,8 @@ def _pad_dflash_inputs(
     # last_hidden_states) so CG replay never reads OOB. Padded
     # sample idx mappings point to -1, which is ignored during
     # sampling to prevent writing stale values to draft logits.
-    pad_end = max_num_reqs * num_speculative_steps
-    for i in range(num_reqs * num_speculative_steps + start, pad_end, stride):
+    pad_end = max_num_reqs * num_sample_steps
+    for i in range(num_reqs * num_sample_steps + start, pad_end, stride):
         block = i + tl.arange(0, BLOCK_SIZE)
         mask = block < pad_end
         tl.store(out_sample_indices_ptr + block, 0, mask=mask)
@@ -794,13 +800,14 @@ def _prepare_dflash_inputs_kernel(
     parallel_drafting_token_id,
     block_size,
     num_query_per_req,
-    num_speculative_steps,
+    num_sample_steps,
     max_num_reqs,
     max_num_tokens,
     max_model_len,
     cp_rank,
     num_reqs,
     SAMPLE_FROM_ANCHOR: tl.constexpr,
+    FIRST_DRAFT_OFFSET: tl.constexpr,
     PAD_SLOT_ID: tl.constexpr,
     CP_SIZE: tl.constexpr,
     CP_INTERLEAVE: tl.constexpr,
@@ -824,7 +831,7 @@ def _prepare_dflash_inputs_kernel(
                 req_idx - num_reqs,
                 num_reqs,
                 num_query_per_req,
-                num_speculative_steps,
+                num_sample_steps,
                 max_num_reqs,
                 max_num_tokens,
                 PAD_SLOT_ID,
@@ -929,10 +936,11 @@ def _prepare_dflash_inputs_kernel(
     # When SAMPLE_FROM_ANCHOR (DSpark), so we sample at EVERY query position
     # and each position k predicts the NEXT token (sampled position = query_pos + 1).
     # Otherwise (DFlash default) the anchor is the bonus token and only the mask tokens
-    # at offsets > 0 are sampled from, each AT its own position.
-    sample_off = 0 if SAMPLE_FROM_ANCHOR else 1
+    # at offsets >= FIRST_DRAFT_OFFSET are sampled from, each AT its own position
+    # (D-MTP2 uses offset 2: slot 1 carries the externally-proposed T1).
+    sample_off = 0 if SAMPLE_FROM_ANCHOR else FIRST_DRAFT_OFFSET
     is_sample = is_query & (query_off >= sample_off)
-    sample_idx = req_idx * num_speculative_steps + (query_off - sample_off)
+    sample_idx = req_idx * num_sample_steps + (query_off - sample_off)
     sample_pos = query_pos + 1 if SAMPLE_FROM_ANCHOR else query_pos
     tl.store(out_sample_indices_ptr + sample_idx, query_idx, mask=is_sample)
     tl.store(out_sample_pos_ptr + sample_idx, sample_pos, mask=is_sample)
@@ -986,12 +994,13 @@ def prepare_dflash_inputs(
     cp_interleave: int,
     parallel_drafting_token_id: int,
     num_query_per_req: int,
-    num_speculative_steps: int,
+    num_sample_steps: int,
     max_num_reqs: int,
     max_num_tokens: int,
     max_model_len: int,
     sample_from_anchor: bool = False,
     num_reqs_override: int | None = None,
+    first_draft_offset: int = 1,
 ) -> None:
     num_reqs = input_batch.num_reqs if num_reqs_override is None else num_reqs_override
     assert num_reqs <= input_batch.num_reqs
@@ -1030,13 +1039,14 @@ def prepare_dflash_inputs(
         parallel_drafting_token_id,
         block_size,
         num_query_per_req,
-        num_speculative_steps,
+        num_sample_steps,
         max_num_reqs,
         max_num_tokens,
         max_model_len,
         cp_rank,
         num_reqs,
         SAMPLE_FROM_ANCHOR=sample_from_anchor,
+        FIRST_DRAFT_OFFSET=first_draft_offset,
         PAD_SLOT_ID=PAD_SLOT_ID,
         CP_SIZE=cp_size,
         CP_INTERLEAVE=cp_interleave,

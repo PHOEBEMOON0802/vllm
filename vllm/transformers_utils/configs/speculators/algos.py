@@ -117,6 +117,41 @@ def update_dflash2(config_dict: dict, pre_trained_config: dict) -> None:
             pre_trained_config["dflash_config"][key] = config_dict[key]
 
 
+@register_speculator("dmtp")
+def update_dmtp(config_dict: dict, pre_trained_config: dict) -> None:
+    raise ValueError(
+        "D-MTP (plain DFlash backbone + frozen MTP first token) is not "
+        "supported; use a D-MTP2 (dmtp2) checkpoint instead."
+    )
+
+
+@register_speculator("dmtp2")
+def update_dmtp2(config_dict: dict, pre_trained_config: dict) -> None:
+    """Apply D-MTP2 specific configuration transformations to the `dict` used
+    to construct the Transformers PreTrainedConfig.
+
+    D-MTP2 pairs the DFlash2 backbone (grouped convolutions + candidate
+    selector) with a frozen first-token path: the verifier's native MTP block
+    proposes T1 and a zero-initialized residual fusion folds the MTP hidden
+    into T1's slot embedding. The draft block is [anchor, T1, MASK x (B-2)],
+    so with block_size B the checkpoint drafts B-1 tokens
+    (num_speculative_tokens must equal B-1, as for DFlash).
+
+    D-MTP2 specific fields (beyond DFlash2's):
+    - mtp_transformer_config: the verifier decoder config the frozen MTP block
+      was built from. Only its hidden_size is consumed here (for validation);
+      the runtime builds the MTP block from the target's own config, which must
+      be the same verifier the draft was trained against.
+    """
+    update_dflash2(config_dict, pre_trained_config)
+    pre_trained_config["architectures"] = ["DMTP2DraftModel"]
+
+    mtp_tc = config_dict.get("mtp_transformer_config") or {}
+    mtp_hidden = mtp_tc.get("hidden_size")
+    if mtp_hidden is not None:
+        pre_trained_config["dflash_config"]["mtp_hidden_size"] = mtp_hidden
+
+
 @register_speculator("dspark")
 def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
     """Apply DSpark specific configuration transformations to the `dict` used to
